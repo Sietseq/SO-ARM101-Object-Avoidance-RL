@@ -256,7 +256,7 @@ $$
 Joint commands are computed as:
 
 $$
-q_{\mathrm{cmd}}=\operatorname{clip}(q_t+\alpha a_t,q_{\min},q_{\max})
+q_{\mathrm{cmd}}=\mathrm{clip}(q_t+\alpha a_t,q_{\min},q_{\max})
 $$
 
 Where:
