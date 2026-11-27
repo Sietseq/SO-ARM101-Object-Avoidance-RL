@@ -19,12 +19,18 @@ class ReachingEnv(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 20}
     success_bonus = 10.0
+    start_pose = np.array([0.0, -0.13, 0.025, 0.93, 0.0])
 
-    def __init__(self, render_mode=None, max_steps=200):
+    def __init__(self, render_mode=None, max_steps=200, *,
+                 min_target_distance=0.04, max_target_distance=0.14):
         # Validate the render mode and episode length.
         if render_mode not in (None, "human") or max_steps < 1:
             raise ValueError("Use render_mode=None/'human' and max_steps >= 1.")
         self.render_mode, self.max_steps = render_mode, max_steps
+        if not 0 < min_target_distance <= max_target_distance:
+            raise ValueError("Target distance bounds must be positive and ordered.")
+        self.min_target_distance = min_target_distance
+        self.max_target_distance = max_target_distance
 
         # Load the robot scene before adding the target marker.
         root = Path(__file__).resolve().parents[1] / "models/SO101"
@@ -123,7 +129,7 @@ class ReachingEnv(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
         low, high = self.limits[:5].T
         # Fixed Stage A start; only the target varies between episodes.
-        start_pose = np.array([0.0, -0.13, 0.025, 0.93, 0.0])
+        start_pose = self.start_pose
         self._place(start_pose)
         if self._collision():
             raise RuntimeError("Fixed starting pose is in collision.")
@@ -142,7 +148,8 @@ class ReachingEnv(gym.Env):
             if not (0.12 < tip[0] < 0.38 and -0.25 < tip[1] < 0.15):
                 continue
             tip[2] = self.target_height
-            if not 0.04 <= np.linalg.norm(tip - start_tip) <= 0.20:
+            distance = np.linalg.norm(tip - start_tip)
+            if not self.min_target_distance <= distance <= self.max_target_distance:
                 continue
             self.goal = tip
             self._goal_pose = angles.copy()
