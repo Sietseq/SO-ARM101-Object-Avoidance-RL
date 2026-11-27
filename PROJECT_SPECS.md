@@ -22,13 +22,14 @@ The policy will be trained in simulation and subsequently deployed on the physic
 The system will use:
 
 - Robot joint positions (proprioception)
-- Target bounding-box coordinates
+- Target XYZ coordinates in the robot's calibrated world frame, in meters
+- Current end-effector XYZ coordinates in the same frame, in meters
 - Obstacle bounding-box coordinates
 - Temporal changes in obstacle detections
 
 The policy will output joint-space movement commands.
 
-**The central hypothesis is that an RL policy can learn effective whole-arm obstacle avoidance using joint positions and 2D visual observations without explicitly receiving the robot's kinematic or collision geometry.**
+**The central hypothesis is that an RL policy can learn effective whole-arm obstacle avoidance using joint positions, target and end-effector XYZ, and 2D obstacle observations without explicitly receiving full robot-link or collision geometry.**
 
 ## 1.2 Research Questions
 
@@ -129,7 +130,8 @@ The policy will output joint-space movement commands.
 
 1. Capture the overhead camera frame.
 2. Detect the target and obstacle.
-3. Extract normalized bounding boxes.
+3. Extract the normalized obstacle bounding box and convert the target
+   position to world XYZ using the calibrated camera and known target plane.
 4. Estimate obstacle movement from consecutive observations.
 5. Read robot joint positions.
 6. Construct the observation vector.
@@ -163,7 +165,8 @@ The target is represented visually in the overhead camera.
 
 An episode succeeds when the end effector reaches a specified distance tolerance from the target's 3D reference position.
 
-The end-effector position is available to the simulator for reward calculation, but is not directly supplied to the policy.
+The current end-effector position is supplied to the policy at each control
+step and used for reward calculation.
 
 ## 4.3 Obstacle
 
@@ -217,10 +220,10 @@ PPO is selected because it provides a well-established continuous-action RL base
 
 ## 5.2 Observation Space
 
-The initial observation vector contains 17 values:
+The initial observation vector contains 19 values:
 
 $$
-o_t=[q_{1:5},b_o,\Delta b_o,b_g]
+o_t=[q_{1:5},b_o,\Delta b_o,p_g,p_e]
 $$
 
 | Component             | Dimensions |
@@ -228,8 +231,9 @@ $$
 | Arm joint positions   |          5 |
 | Obstacle bounding box |          4 |
 | Bounding-box changes  |          4 |
-| Target bounding box   |          4 |
-| **Total**             |     **17** |
+| Target XYZ position   |          3 |
+| End-effector XYZ      |          3 |
+| **Total**             |     **19** |
 
 Bounding boxes are represented as:
 
@@ -237,13 +241,18 @@ $$
 b=[c_x,c_y,w,h]
 $$
 
-All image coordinates and dimensions are normalized by image width and height.
+Obstacle image coordinates and dimensions are normalized by image width
+and height. The target is supplied as world XYZ in meters, not a bounding box.
 
 Joint positions are normalized using their valid ranges. Temporal differences are calculated using a consistent observation interval.
 
 The initial observation design assumes that slow control and fixed target height make the task sufficiently observable. Joint velocities or additional observation history may be introduced if necessary.
 
-No explicit forward kinematics, robot-link positions, link-to-obstacle distances, or planned trajectories will be provided to the policy.
+End-effector XYZ is provided from simulator state during training.
+Physical deployment must provide the equivalent position in the same
+calibrated frame, using forward kinematics or external tracking.
+Other robot-link positions, link-to-obstacle distances, and planned
+trajectories are not supplied to the policy.
 
 ## 5.3 Action Space
 
@@ -389,7 +398,7 @@ Initial implementation uses OpenCV color segmentation.
 
 The target and obstacle will have distinct colors.
 
-The detector outputs:
+For the obstacle, the detector outputs:
 
 $$
 [c_x,c_y,w,h]

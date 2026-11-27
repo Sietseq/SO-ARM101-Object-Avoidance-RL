@@ -26,3 +26,77 @@ defined in this repository.
 
 Keep machine-specific paths, editor settings, credentials, and local
 environment configuration out of committed files.
+
+## Stage A PPO training
+
+Use an environment containing MuJoCo, Gymnasium, PyTorch, and
+Stable-Baselines3. Training uses only the simulator. The default task is
+Stage A reaching without obstacles.
+
+```powershell
+python scripts/train_ppo.py --output outputs/ppo-stage-a-seed0
+```
+
+Device selection defaults to `--device auto`, which uses CUDA when
+available and otherwise uses CPU. Select a device explicitly with:
+
+```powershell
+python scripts/train_ppo.py --device cuda --output outputs/ppo-stage-a-gpu
+python scripts/train_ppo.py --device cpu --output outputs/ppo-stage-a-cpu
+```
+
+Check CUDA availability in the active Python environment:
+
+```powershell
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+For a short integration check that includes a PPO update and evaluation:
+
+```powershell
+python scripts/train_ppo.py --timesteps 128 --n-steps 128 --batch-size 64 --eval-freq 128 --eval-episodes 2 --output outputs/ppo-smoke
+```
+
+Each run requires a new output directory. Outputs include training
+episode diagnostics, PPO metrics, evaluation results, the best model
+by evaluation mean reward, and the final model. PPO rounds training
+up to complete rollouts. A smoke test does not establish policy quality.
+
+
+## Stage B static obstacle
+
+The separate `StaticObstacleEnv` extends the reaching environment. The
+starting pose and box position stay fixed while target positions vary,
+within the existing 4-20 cm distance range. The visible box is 2 x 2 x 4 cm;
+its footprint is an infinite-height exclusion zone across the arm's reachable
+height range. Contacts against any modeled robot collision geometry end
+the episode. Sampled joint-space detours validate layouts during pool
+generation; they are not supplied to the policy.
+
+Training precomputes 512 layouts on first reset and samples from that pool
+for subsequent episodes. Static-obstacle training defaults to about 80%
+clear-route targets and 20% blocked targets. Clear-route targets have
+a validated direct joint path; blocked targets have a sampled detour.
+Increase `--blocked-fraction` from `0.2` to `0.5`, then `1.0`, in separate
+resumed runs as avoidance improves. Callback evaluation uses only blocked
+targets in a separate 128-layout pool with a different generation seed.
+Pool construction prints progress and adds a startup delay; pools stay in
+memory and rebuild for each run.
+Standalone evaluation with `test_policy.py` generates fresh targets for
+each seeded episode to check generalization beyond the training pool.
+
+The 19-value observation and five-joint action interfaces are unchanged.
+The obstacle fields now contain its normalized overhead-camera bounding
+box and zero temporal changes. Projection assumes a square camera image.
+
+Continue from a reaching checkpoint in a new output directory:
+
+```powershell
+python scripts/train_ppo.py --task static-obstacle --blocked-fraction 0.2 --resume outputs/ppo-curriculum-4-20cm-cpu-seed0/best/best_model.zip --device cpu --output outputs/ppo-static-mixed-seed0
+```
+
+Evaluate on the same task (including when testing a reaching baseline):
+
+```powershell
+python scripts/test_policy.py outputs/ppo-static-mixed-seed0/best/best_model.zip --task static-obstacle --episodes 100 --seed 10000 --render
+```

@@ -1,4 +1,4 @@
-"""Stage A: simulated reaching with joint state and ideal overhead bounding boxes."""
+"""Stage A: simulated reaching with joint state and a world-coordinate target."""
 
 import argparse
 from contextlib import nullcontext
@@ -32,10 +32,11 @@ class ReachingEnv(gym.Env):
         # The target is a visual marker, so reaching it never causes a collision.
         marker = ET.SubElement(xml.find("worldbody"), "body",
                                name="reaching_target", mocap="true")
-        self.half_size = np.array([0.01, 0.01, 0.002])
         ET.SubElement(marker, "geom", type="box", size="0.01 0.01 0.002",
                       rgba="0 1 0 1", contype="0", conaffinity="0")
         
+        self._add_task_objects(xml)
+
         # Bundle model files and meshes for MuJoCo.
         assets = {
             p.relative_to(root).as_posix(): p.read_bytes()
@@ -69,16 +70,24 @@ class ReachingEnv(gym.Env):
         # Initial target plane: 15 cm above the model floor; calibrate later.
         self.target_height, self.tolerance = 0.15, 0.02
         
-        # World-coordinate rectangle represented by the ideal image, in meters.
-        # Approximately matches the current straight-down view at target height.
-        # Calibrate these bounds against the real overhead camera before transfer.
-        self.image_bounds = np.array([[-0.50, 0.50], [-0.525, 0.225]])
         self.action_space = spaces.Box(-1.0, 1.0, (5,), dtype=np.float32)
         
-        # Layout: joints[5], obstacle box[4], obstacle delta[4], target box[4].
-        low = np.array([-1] * 5 + [0] * 4 + [-1] * 4 + [0] * 4, np.float32)
-        self.observation_space = spaces.Box(low, np.ones(17, np.float32))
+        # Layout: joints[5], obstacle box[4], obstacle delta[4],
+        # target XYZ[3], end-effector XYZ[3]. Cartesian values are meters.
+        low = np.array(
+            [-1] * 5 + [0] * 4 + [-1] * 4
+            + [0.12, -0.25, self.target_height]
+            + [-1.0] * 3, dtype=np.float32,
+        )
+        high = np.array(
+            [1] * 13 + [0.38, 0.15, self.target_height]
+            + [1.0] * 3, dtype=np.float32,
+        )
+        self.observation_space = spaces.Box(low, high)
         self._viewer, self._done = None, True
+
+    def _add_task_objects(self, xml):
+        """Extend the scene for later curriculum stages."""
 
     def _place(self, angles):
         # Set the arm pose, hold the gripper closed, and clear motion.
@@ -93,31 +102,15 @@ class ReachingEnv(gym.Env):
         # base has no collision geometry; native parent/child filters apply.
         return any(c.dist <= 0 for c in self.data.contact)
 
-    def _box(self, position):
-        # Directly map the target's XY position into [cx, cy, width, height].
-        # This assumes a fixed target height and a straight-down view:
-        # +X points right, +Y points up, and image y grows downward.
-        # No image rendering or 3D corner projection is needed.
-        (xmin, xmax), (ymin, ymax) = self.image_bounds
-        width, height = xmax - xmin, ymax - ymin
-        x, y = position[:2]
-        box = np.array([
-            (x - xmin) / width,
-            (ymax - y) / height,
-            2 * self.half_size[0] / width,
-            2 * self.half_size[1] / height,
-        ], dtype=np.float32)
-        # Keep only targets whose full box lies inside the normalized image.
-        low, high = box[:2] - box[2:] / 2, box[:2] + box[2:] / 2
-        return box if np.all(low >= 0) and np.all(high <= 1) else None
-
     def _observation(self):
         # Normalize arm joint positions to [-1, 1].
         q = self.data.qpos[self.addresses[:5]]
         low, high = self.limits[:5].T
         joints = np.clip(2 * (q - low) / (high - low) - 1, -1, 1)
         # Zero boxes reserve the future obstacle fields without inventing one.
-        return np.concatenate((joints, np.zeros(8), self.target_box)).astype(np.float32)
+        return np.concatenate((
+            joints, np.zeros(8), self.goal, self.data.site_xpos[self.tip]
+        )).astype(np.float32)
 
     def _distance(self):
         # Measure the end effector's 3D distance to the target.
@@ -128,11 +121,19 @@ class ReachingEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         low, high = self.limits[:5].T
+        # Fixed Stage A start; only the target varies between episodes.
+        start_pose = np.array([0.0, -0.13, 0.025, 0.93, 0.0])
+        self._place(start_pose)
+        if self._collision():
+            raise RuntimeError("Fixed starting pose is in collision.")
+        start_tip = self.data.site_xpos[self.tip].copy()
+        target_low = np.maximum(low + 0.05, start_pose - 0.75)
+        target_high = np.minimum(high - 0.05, start_pose + 0.75)
         # Rejection sampling uses simulator geometry only for task generation.
         # A nearby collision-free pose witnesses reachability within tolerance;
-        # it does not guarantee a collision-free path from every random start.
+        # it does not guarantee a collision-free path from the fixed start.
         for _ in range(10000):
-            angles = self.np_random.uniform(low + 0.05, high - 0.05)
+            angles = self.np_random.uniform(target_low, target_high)
             self._place(angles)
             tip = self.data.site_xpos[self.tip].copy()
             if self._collision() or abs(tip[2] - self.target_height) > 0.005:
@@ -140,21 +141,15 @@ class ReachingEnv(gym.Env):
             if not (0.12 < tip[0] < 0.38 and -0.25 < tip[1] < 0.15):
                 continue
             tip[2] = self.target_height
-            box = self._box(tip)
-            if box is not None:
-                self.goal, self.target_box = tip, box
-                self._goal_pose = angles.copy()
-                break
+            if not 0.04 <= np.linalg.norm(tip - start_tip) <= 0.20:
+                continue
+            self.goal = tip
+            self._goal_pose = angles.copy()
+            break
         else:
-            raise RuntimeError("Could not sample a reachable, visible target.")
+            raise RuntimeError("Could not sample a reachable target.")
         self.data.mocap_pos[self.mocap] = self.goal
-        # Sample a safe starting pose away from the target.
-        for _ in range(10000):
-            self._place(self.np_random.uniform(low + 0.05, high - 0.05))
-            if not self._collision() and self._distance() > 3 * self.tolerance:
-                break
-        else:
-            raise RuntimeError("Could not sample a collision-free starting pose.")
+        self._place(start_pose)
         # Initialize episode tracking and the first observation.
         self._steps, self._done = 0, False
         self._previous_distance = self._distance()
@@ -236,15 +231,18 @@ class ReachingEnv(gym.Env):
                 self._info(success, collision, unsafe))
 
     def render(self):
-        # Open the viewer on demand using the overhead camera.
+        # Open an adjustable angled view of the arm and target.
         if self.render_mode != "human":
             return
         if self._viewer is None:
             from mujoco import viewer
             self._viewer = viewer.launch_passive(self.model, self.data)
             with self._viewer.lock():
-                self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-                self._viewer.cam.fixedcamid = self.camera
+                self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                self._viewer.cam.lookat[:] = [0.18, -0.05, 0.15]
+                self._viewer.cam.distance = 0.85
+                self._viewer.cam.azimuth = 135
+                self._viewer.cam.elevation = -30
         if self._viewer.is_running():
             self._viewer.sync()
 
