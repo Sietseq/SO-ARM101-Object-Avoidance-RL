@@ -28,6 +28,8 @@ standalone evaluations.
 - `models/SO101/`: SO-ARM101 model files and assets.
 - `PROJECT_SPECS.md`: project specification.
 - `EXPERIMENTS.md`: results and experiment decisions.
+- `ROS2_COMMANDS.md`: ROS 2 environment, build, run, and inspection commands;
+  it also marks planned interfaces that do not exist yet.
 
 Training outputs are written under `outputs/` and are ignored by Git. Keep
 machine-specific paths, editor settings, credentials, and local environment
