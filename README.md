@@ -59,8 +59,9 @@ python scripts/train_ppo.py --timesteps 128 --n-steps 128 --batch-size 64 --eval
 
 Each run requires a new output directory. Outputs include training
 episode diagnostics, PPO metrics, evaluation results, the best model
-by evaluation mean reward, and the final model. PPO rounds training
-up to complete rollouts. A smoke test does not establish policy quality.
+by evaluation success rate (mean reward breaks ties), and the final model.
+PPO rounds training up to complete rollouts. A smoke test does not establish
+policy quality.
 
 
 ## Stage B static obstacle
@@ -100,3 +101,24 @@ Evaluate on the same task (including when testing a reaching baseline):
 ```powershell
 python scripts/test_policy.py outputs/ppo-static-mixed-seed0/best/best_model.zip --task static-obstacle --episodes 100 --seed 10000 --render
 ```
+
+
+## PPO fine-tuning after behavior cloning
+
+Static-obstacle reaching uses a success bonus of 50; Stage A keeps its
+bonus of 10. Collision penalties and time costs retain their existing values.
+Checkpoint selection prioritizes success rate, with mean reward breaking
+ties. The initial policy is evaluated and saved before learning begins.
+Every evaluation uses the same seeded scenarios for a consistent comparison.
+
+For a shorter fine-tuning experiment from the preserved BC checkpoint:
+
+```powershell
+python scripts/train_ppo.py --task static-obstacle --blocked-fraction 0.2 --resume outputs/bc-static-seed0/best_model.zip --device cpu --learning-rate 0.00003 --action-std 0.1 --target-kl 0.01 --timesteps 50000 --eval-freq 5000 --eval-episodes 100 --output outputs/ppo-after-bc-gentle-seed0
+```
+
+The optional learning-rate and KL settings override checkpoint values.
+The action standard deviation initializes exploration noise; PPO can
+subsequently change it. Without these options, resumed runs keep their
+saved settings. Compare success rates across runs; the changed reward
+scale makes old and new mean rewards different.

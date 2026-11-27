@@ -18,6 +18,7 @@ class ReachingEnv(gym.Env):
     """No hardware access. The imported dynamics and camera pose are provisional."""
 
     metadata = {"render_modes": ["human"], "render_fps": 20}
+    success_bonus = 10.0
 
     def __init__(self, render_mode=None, max_steps=200):
         # Validate the render mode and episode length.
@@ -215,7 +216,7 @@ class ReachingEnv(gym.Env):
             # Initial reward weights: progress in meters, time cost, and
             # terminal bonuses/penalties. These remain tuning parameters.
             reward = 10 * (self._previous_distance - distance) - 0.01
-            reward += 10 * success - 10 * bool(collision or unsafe)
+            reward += self.success_bonus * success - 10 * bool(collision or unsafe)
             self._previous_distance = distance
             # Track episode completion and the time limit.
             self._steps += 1

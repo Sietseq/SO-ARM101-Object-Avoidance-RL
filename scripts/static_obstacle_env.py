@@ -12,6 +12,8 @@ from reaching_env import ReachingEnv
 class StaticObstacleEnv(ReachingEnv):
     """Same controls and observations as Stage A, with whole-arm avoidance."""
 
+    success_bonus = 50.0
+
     # Meters. The visible box is 2 x 2 x 4 cm; height never permits a bypass.
     box_xy = np.array([0.28, -0.06])
     box_half = np.array([0.01, 0.01])

@@ -1,16 +1,54 @@
 """Train a simulation-only reaching or static-obstacle policy with SB3 PPO."""
 
 import argparse
+import math
 from pathlib import Path
+
+import numpy as np
+import torch
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.distributions import DiagGaussianDistribution
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 
 from reaching_env import ReachingEnv
 from static_obstacle_env import StaticObstacleEnv
+
+
+class SuccessEvalCallback(EvalCallback):
+    """Evaluate a fixed seeded set; save by success rate, then mean reward."""
+
+    def __init__(self, eval_env, *, best_model_save_path, eval_seed, **kwargs):
+        super().__init__(eval_env, best_model_save_path=None, verbose=0, **kwargs)
+        self.success_path = Path(best_model_save_path)
+        self.eval_seed = eval_seed
+        self.best_score = (float("-inf"), float("-inf"))
+
+    def _on_training_start(self):
+        # Establish and save the starting policy before PPO changes it.
+        self._on_step()
+
+    def _on_step(self):
+        due = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
+        if due:
+            self.eval_env.seed(self.eval_seed)
+        keep_training = super()._on_step()
+        if due:
+            if not self._is_success_buffer:
+                raise RuntimeError("Evaluation must report is_success.")
+            score = (float(np.mean(self._is_success_buffer)), self.last_mean_reward)
+            print(f"Evaluation: success={score[0]:.1%}, mean reward={score[1]:.2f}",
+                  flush=True)
+            if score > self.best_score:
+                self.success_path.mkdir(parents=True, exist_ok=True)
+                self.model.save(self.success_path / "best_model")
+                self.best_score = score
+                print("Saved best policy by success rate (reward breaks ties).",
+                      flush=True)
+        return keep_training
 
 
 def main():
@@ -32,6 +70,12 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="auto")
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--target-kl", type=float, default=None)
+    parser.add_argument(
+        "--action-std", type=float, default=None,
+        help="Initial Gaussian exploration standard deviation in action units.",
+    )
     parser.add_argument("--n-steps", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--eval-freq", type=int, default=10_000)
@@ -50,6 +94,11 @@ def main():
         parser.error("Rollout and batch sizes must be at least two.")
     if args.n_steps % args.batch_size:
         parser.error("Batch size must divide the single-environment rollout.")
+
+    for name in ("learning_rate", "target_kl", "action_std"):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"{name.replace('_', '-')} must be finite and positive.")
 
     # Require a new directory so previous experiments remain intact.
     args.output.mkdir(parents=True, exist_ok=False)
@@ -72,35 +121,46 @@ def main():
         )
         eval_env = Monitor(env_class(**eval_kwargs))
         eval_env.reset(seed=args.seed + 1)
-        callback = EvalCallback(
+        callback = SuccessEvalCallback(
             eval_env,
             best_model_save_path=str(args.output / "best"),
+            eval_seed=args.seed + 1,
             log_path=str(args.output / "evaluation"),
             eval_freq=args.eval_freq,
             n_eval_episodes=args.eval_episodes,
             deterministic=True,
         )
         if args.resume is not None:
+            overrides = {
+                name: getattr(args, name) for name in ("learning_rate", "target_kl")
+                if getattr(args, name) is not None
+            }
             model = PPO.load(
                 args.resume, env=train_env, device=args.device,
                 seed=args.seed, n_steps=args.n_steps,
-                batch_size=args.batch_size,
+                batch_size=args.batch_size, **overrides,
             )
             print(f"Continuing from {model.num_timesteps} trained steps.")
         else:
             model = PPO(
                 "MlpPolicy", train_env,
-                learning_rate=3e-4,
+                learning_rate=args.learning_rate if args.learning_rate is not None else 3e-4,
                 n_steps=args.n_steps,
                 batch_size=args.batch_size,
                 n_epochs=10,
                 gamma=0.99,
                 gae_lambda=0.95,
                 clip_range=0.2,
+                target_kl=args.target_kl,
                 seed=args.seed,
                 device=args.device,
                 verbose=1,
             )
+        if args.action_std is not None:
+            if not isinstance(model.policy.action_dist, DiagGaussianDistribution):
+                raise ValueError("--action-std requires a diagonal Gaussian policy.")
+            with torch.no_grad():
+                model.policy.log_std.fill_(math.log(args.action_std))
         model.set_logger(configure(str(args.output), ["stdout", "csv"]))
         try:
             model.learn(
