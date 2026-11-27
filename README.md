@@ -8,9 +8,9 @@ training history and results.
 
 ## Current project direction
 
-The work progressed from fixed-start reaching to randomized reaches, then
-static obstacle avoidance. Targets are currently limited to 4–14 cm from the
-initial end-effector position: the 4–20 cm range proved too difficult on the
+The work progressed from fixed-start reaching on closer targets to randomized
+reaches, then static obstacle avoidance. Targets are currently limited to
+4–14 cm from the initial end-effector position: the 4–20 cm range proved too difficult on the
 longer reaches, while the 4–14 cm evaluation solved 98/100 targets with no
 collisions. The latest recorded static curriculum run is
 `static-curriculum-stage1-continued`; its recorded evaluation peaked at 78%.
