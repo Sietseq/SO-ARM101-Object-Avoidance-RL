@@ -332,21 +332,7 @@ Training will follow a curriculum of progressively harder tasks.
 
 **Completion criterion:** The policy demonstrates reliable reaching on unseen valid configurations.
 
-## Stage B — Static Obstacle
-
-**Environment:** One stationary obstacle.
-
-**Objective:** Learn whole-arm collision avoidance.
-
-**Randomization:**
-
-- Initial joint configuration
-- Target position
-- Obstacle position
-
-**Completion criterion:** The policy improves collision-free reaching performance over a reaching-only baseline.
-
-## Stage C — Dynamic Obstacle
+## Stage B — Dynamic Obstacle
 
 **Environment:** One moving obstacle.
 
@@ -362,7 +348,7 @@ Training will follow a curriculum of progressively harder tasks.
 
 **Completion criterion:** The policy achieves meaningful success rates on previously unseen moving-obstacle scenarios.
 
-## Stage D — Domain Randomization
+## Stage C — Domain Randomization
 
 Introduce controlled variations in:
 

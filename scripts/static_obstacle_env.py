@@ -1,204 +1,284 @@
-"""Stage B: fixed-start reaching around a stationary vertical exclusion column."""
+"""Static-block reaching task for demonstrating learned obstacle avoidance."""
 
+from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 
-import gymnasium as gym
+from gymnasium import spaces
 import mujoco
 import numpy as np
 
 from reaching_env import ReachingEnv
 
 
-class StaticObstacleEnv(ReachingEnv):
-    """Same controls and observations as Stage A, with whole-arm avoidance."""
+@dataclass(frozen=True)
+class CurriculumStage:
+    min_distance: float
+    max_distance: float
+    min_start_clearance: float
+    along: tuple
+    lateral: tuple
 
-    # Meters. The visible box is 2 x 2 x 4 cm; height never permits a bypass.
-    box_xy = np.array([0.28, -0.06])
-    box_half = np.array([0.01, 0.01])
+
+# Meters; along is the fraction of the start-to-target XY segment.
+# Stage 0 retains the original sampler; stage 1 is the active curriculum.
+CURRICULUM = {
+    1: CurriculumStage(0.10, 0.14, 0.04, (0.70, 0.95), (0.018, 0.040)),
+}
+
+
+class StaticObstacleEnv(ReachingEnv):
+    """Reach randomized targets while avoiding a randomized static block."""
+
+    obstacle_half_size = np.array([0.018, 0.018, 0.12])
+    obstacle_center_z = 0.13
+    min_start_clearance = 0.01  # meters between collision surfaces
 
     def _add_task_objects(self, xml):
         body = ET.SubElement(
-            xml.find("worldbody"), "body", name="static_obstacle",
-            mocap="true", pos="2 2 0.5",
-        )
-        # Covers all heights the joint-limited arm can reach.
-        ET.SubElement(
-            body, "geom", name="obstacle_column", type="box",
-            size="0.01 0.01 1", rgba="0 0 0 0", group="5",
+            xml.find("worldbody"), "body", name="static_obstacle", mocap="true",
+            pos="1.0 1.0 0.13",
         )
         ET.SubElement(
-            body, "geom", name="obstacle_visible", type="box",
-            pos="0 0 -0.48", size="0.01 0.01 0.02",
-            rgba="1 0.25 0.05 1", contype="0", conaffinity="0",
+            body, "geom", name="static_obstacle_geom", type="box",
+            size="0.018 0.018 0.12", rgba="0.9 0.25 0.12 1",
         )
 
-    def __init__(self, render_mode=None, max_steps=200, *, pool_size=512,
-                 pool_seed=0, blocked_fraction=1.0):
-        if not isinstance(pool_size, int) or pool_size < 0:
-            raise ValueError("pool_size must be a nonnegative integer.")
-        if not isinstance(pool_seed, int) or pool_seed < 0:
-            raise ValueError("pool_seed must be a nonnegative integer.")
-        if not 0.0 <= blocked_fraction <= 1.0:
-            raise ValueError("blocked_fraction must be between zero and one.")
-        self.blocked_fraction = blocked_fraction
-        self.pool_size, self.pool_seed = pool_size, pool_seed
-        self._layout_pool = None
-        self._box_observation = np.zeros(4, dtype=np.float32)
-        super().__init__(render_mode=render_mode, max_steps=max_steps)
-        self.box_mocap = int(self.model.body("static_obstacle").mocapid[0])
+    def __init__(
+        self, render_mode=None, max_steps=200, *, curriculum_stage=0,
+        clear_episode_prob=0.0,
+    ):
+        if curriculum_stage not in (0, *CURRICULUM):
+            raise ValueError("Unknown obstacle curriculum stage.")
+        if not 0 <= clear_episode_prob <= 1:
+            raise ValueError("Clear episode probability must be in [0, 1].")
+        self.curriculum_stage = curriculum_stage
+        self.lesson = CURRICULUM.get(curriculum_stage)
+        self.clear_episode_prob = clear_episode_prob
+        self.obstacle_present = True
+        kwargs = {}
+        if self.lesson is not None:
+            self.min_start_clearance = self.lesson.min_start_clearance
+            kwargs = dict(min_target_distance=self.lesson.min_distance,
+                          max_target_distance=self.lesson.max_distance)
+        super().__init__(render_mode=render_mode, max_steps=max_steps, **kwargs)
+        self.obstacle_mocap = int(self.model.body("static_obstacle").mocapid[0])
+        self.block_geom = self.model.geom("static_obstacle_geom").id
+        block = self.block_geom
+        # The scene's other non-world, contact-compatible geoms belong to the arm.
+        self.arm_geoms = np.flatnonzero(
+            (self.model.geom_bodyid != 0)
+            & (self.model.geom_bodyid != self.model.geom_bodyid[block])
+            & (((self.model.geom_contype & self.model.geom_conaffinity[block])
+                | (self.model.geom_conaffinity & self.model.geom_contype[block])) != 0)
+        )
+        self.obstacle_xy = np.array([0.25, -0.05], dtype=np.float64)
+        low = np.array(
+            [-1] * 5 + [0.12, -0.25, 0.0] + [0.036, 0.036, 0.24]
+            + [0] * 2 + [0.12, -0.25, self.target_height] + [-1.0] * 3,
+            dtype=np.float32,
+        )
+        high = np.array(
+            [1] * 5 + [0.38, 0.15, 0.24] + [0.036, 0.036, 0.24]
+            + [0] * 2 + [0.38, 0.15, self.target_height] + [1.0] * 3,
+            dtype=np.float32,
+        )
+        if curriculum_stage or clear_episode_prob:
+            low[5:11] = np.minimum(low[5:11], 0.0)
+        self.observation_space = spaces.Box(low, high)
 
     def _observation(self):
-        obs = super()._observation()
-        obs[5:9] = self._box_observation
-        # A stationary obstacle has zero bounding-box changes.
-        return obs
+        q = self.data.qpos[self.addresses[:5]]
+        low, high = self.limits[:5].T
+        joints = np.clip(2 * (q - low) / (high - low) - 1, -1, 1)
 
-    def _project_box(self):
-        # Project all eight visible-box corners using the actual scene camera.
-        corners = np.array([
-            [x, y, z]
-            for x in self.box_xy[0] + np.array([-0.01, 0.01])
-            for y in self.box_xy[1] + np.array([-0.01, 0.01])
-            for z in (0.0, 0.04)
-        ])
-        rotation = self.data.cam_xmat[self.camera].reshape(3, 3)
-        local = (corners - self.data.cam_xpos[self.camera]) @ rotation
-        depth = -local[:, 2]
-        if np.any(depth <= 0):
-            raise RuntimeError("Obstacle is behind the overhead camera.")
-        # Square image; camera fovy defines both axes for aspect ratio one.
-        scale = 2 * depth * np.tan(np.deg2rad(self.model.cam_fovy[self.camera]) / 2)
-        uv = np.column_stack((0.5 + local[:, 0] / scale,
-                              0.5 - local[:, 1] / scale))
-        if np.any(uv < 0) or np.any(uv > 1):
-            raise RuntimeError("Obstacle is outside the overhead camera view.")
-        low, high = uv.min(axis=0), uv.max(axis=0)
-        return np.concatenate(((low + high) / 2, high - low)).astype(np.float32)
+        if not self.obstacle_present:
+            return super()._observation()
 
-    def _blocks_segment(self, start, goal):
-        # Slab intersection of the straight XY route with the box footprint.
-        delta = goal[:2] - start[:2]
-        enter, leave = 0.0, 1.0
-        for axis in range(2):
-            low, high = self.box_xy[axis] + np.array([-1, 1]) * self.box_half[axis]
-            if abs(delta[axis]) < 1e-12:
-                if not low <= start[axis] <= high:
-                    return False
-                continue
-            a, b = sorted(((low - start[axis]) / delta[axis],
-                           (high - start[axis]) / delta[axis]))
-            enter, leave = max(enter, a), min(leave, b)
-        return 0 < enter <= leave < 1
+        # Obstacle center and full dimensions use the robot/world frame in meters.
+        obstacle = np.array([
+            self.obstacle_xy[0], self.obstacle_xy[1], self.obstacle_center_z,
+            *(2 * self.obstacle_half_size),
+        ], dtype=np.float64)
+        return np.concatenate((
+            joints, obstacle, np.zeros(2), self.goal, self.data.site_xpos[self.tip]
+        )).astype(np.float32)
 
-    def _clear_segment(self, start, end):
-        # Geometry-only task validation; these poses never enter observations.
-        count = max(1, int(np.ceil(np.max(np.abs(end - start)) / 0.04)))
-        for pose in np.linspace(start, end, count + 1):
-            self._place(pose)
-            if self._collision():
-                return False
-        return True
-
-    def _build_layout_pool(self):
-        blocked_count = round(self.pool_size * self.blocked_fraction)
-        print(f"Precomputing {self.pool_size} layouts "
-              f"({blocked_count} blocked, seed {self.pool_seed})...", flush=True)
-        sampler = StaticObstacleEnv(max_steps=self.max_steps, pool_size=0)
-        layouts = []
+    def _reset_reaching(self, *, seed=None, options=None):
+        # Parent reset parks the block via mj_resetData. Do not render until
+        # the final obstacle layout is installed.
+        mode = self.render_mode
+        self.render_mode = None
         try:
-            for index in range(self.pool_size):
-                sampler.blocked_fraction = 1.0 if index < blocked_count else 0.0
-                sampler.reset(seed=self.pool_seed if index == 0 else None)
-                layouts.append((
-                    sampler.data.qpos[sampler.addresses[:5]].copy(),
-                    sampler.goal.copy(), sampler._goal_pose.copy(),
-                    sampler._waypoint_pose.copy(),
-                ))
-                if (index + 1) % 128 == 0 or index + 1 == self.pool_size:
-                    print(f"Validated {index + 1}/{self.pool_size} layouts.",
-                          flush=True)
+            return super().reset(seed=seed, options=options)
         finally:
-            sampler.close()
-        self._layout_pool = tuple(layouts)
+            self.render_mode = mode
 
-    def reset(self, *, seed=None, options=None):
-        if self.pool_size == 0:
-            return self._sample_layout(seed=seed, options=options)
-        gym.Env.reset(self, seed=seed)
-        if self._layout_pool is None:
-            self._build_layout_pool()
-        index = int(self.np_random.integers(len(self._layout_pool)))
-        start, goal, goal_pose, waypoint = self._layout_pool[index]
-        mujoco.mj_resetData(self.model, self.data)
-        self.goal = goal.copy()
-        self._goal_pose = goal_pose.copy()
-        self._waypoint_pose = waypoint.copy()
-        self.data.mocap_pos[self.mocap] = self.goal
-        self.data.mocap_pos[self.box_mocap] = [*self.box_xy, 0.5]
-        self._place(start)
-        self._box_observation = self._project_box()
+    def _set_block(self, xy):
+        self.obstacle_xy = np.asarray(xy, dtype=np.float64).copy()
+        self.data.mocap_pos[self.obstacle_mocap] = [*xy, self.obstacle_center_z]
+        mujoco.mj_forward(self.model, self.data)
+
+    def _has_start_clearance(self):
+        return not self._collision() and all(
+            mujoco.mj_geomDistance(
+                self.model, self.data, self.block_geom, int(geom),
+                self.min_start_clearance, None,
+            ) >= self.min_start_clearance for geom in self.arm_geoms
+        )
+
+    def _valid_layout(self, xy):
+        self._set_block(xy)
+        self._place(self.start_pose)
+        if not self._has_start_clearance():
+            return False
+        self._place(self._goal_pose)
+        return not self._collision()
+
+    def _finish_reset(self, info):
+        self._place(self.start_pose)
         self._previous_distance = self._distance()
-        self._steps, self._done = 0, False
         self._last_obs = self._observation()
         if self.render_mode == "human":
             self.render()
-        return self._last_obs.copy(), self._info(False, False, False)
+        return self._last_obs.copy(), info
 
-    def _sample_layout(self, *, seed=None, options=None):
-        gym.Env.reset(self, seed=seed)
-        require_blocked = self.np_random.random() < self.blocked_fraction
-        # Stage A samples targets with the column parked out of the workspace.
-        render_mode = self.render_mode
-        self.render_mode = None
-        self._box_observation[:] = 0
-        try:
-            for attempt in range(200):
-                super().reset(options=options)
-                start = self.data.qpos[self.addresses[:5]].copy()
-                start_tip = self.data.site_xpos[self.tip].copy()
-                goal_pose = self._goal_pose.copy()
-                if self._blocks_segment(start_tip, self.goal) != require_blocked:
-                    continue
-                # Keep the entire success ball clear of the exclusion footprint.
-                clearance = np.maximum(np.abs(self.goal[:2] - self.box_xy)
-                                       - self.box_half, 0)
-                if np.linalg.norm(clearance) <= self.tolerance:
-                    continue
-                self.data.mocap_pos[self.box_mocap] = [*self.box_xy, 0.5]
-                self._place(start)
-                if self._collision():
-                    raise RuntimeError("Fixed obstacle intersects the fixed start.")
-                self._place(goal_pose)
-                if self._collision():
-                    continue
-                # Clear-route targets use a direct joint interpolation;
-                # blocked targets require a sampled detour.
-                low, high = self.limits[:5].T
-                middle = (start + goal_pose) / 2
-                for _ in range(32 if require_blocked else 1):
-                    waypoint = (
-                        self.np_random.uniform(
-                            np.maximum(low + 0.05, middle - 0.8),
-                            np.minimum(high - 0.05, middle + 0.8),
-                        ) if require_blocked else middle
-                    )
-                    if (self._clear_segment(start, waypoint)
-                            and self._clear_segment(waypoint, goal_pose)):
-                        self._waypoint_pose = waypoint.copy()
-                        break
-                else:
-                    continue
-                self._place(start)
-                self._box_observation = self._project_box()
-                self._previous_distance = self._distance()
-                self._steps, self._done = 0, False
-                self._last_obs = self._observation()
-                break
-            else:
-                self._done = True
-                raise RuntimeError("Could not sample a target with a clear detour.")
-        finally:
-            self.render_mode = render_mode
+    def place_planning_start(self, joint_positions, obstacle_xy, home_tolerance=0.0):
+        """Verify and place the stationary measured arm and the training block."""
+        self._done = True
+        joints = np.asarray(joint_positions, dtype=np.float64)
+        xy = np.asarray(obstacle_xy, dtype=np.float64)
+        for name, value, size in (("joint_positions", joints, 6), ("obstacle_xy", xy, 2)):
+            if value.shape != (size,) or not np.isfinite(value).all():
+                raise ValueError(f"{name} must contain {size} finite values.")
+        if not np.isfinite(home_tolerance) or home_tolerance < 0:
+            raise ValueError("home_tolerance must be finite and nonnegative.")
+        if np.any(joints < self.limits[:, 0]) or np.any(joints > self.limits[:, 1]):
+            raise ValueError("Measured joints are outside the model limits.")
+
+        mujoco.mj_resetData(self.model, self.data)
+        self._place(self.start_pose)
+        if np.any(np.abs(joints - self.data.qpos[self.addresses]) > home_tolerance):
+            raise ValueError("Measured joints are outside the training home tolerance.")
+        self.data.qpos[self.addresses] = joints
+        self.data.ctrl[self.actuators] = joints
+        self.obstacle_present = True
+        self._set_block(xy)
+        if not self._has_start_clearance():
+            raise ValueError("Starting scene is in contact or lacks obstacle clearance.")
+        return self.data.site_xpos[self.tip].copy()
+
+    def reset_for_planning(self, *, joint_positions, target_position, obstacle_xy,
+                           home_tolerance=0.0):
+        """Start a rollout from measured joints (radians) to a world target (meters)."""
+        self.place_planning_start(joint_positions, obstacle_xy, home_tolerance)
+        target = np.asarray(target_position, dtype=np.float64)
+        if target.shape != (3,) or not np.isfinite(target).all():
+            raise ValueError("target_position must contain 3 finite values.")
+        self.goal = target.copy()
+        self.data.mocap_pos[self.mocap] = target
+        mujoco.mj_forward(self.model, self.data)
+        observation = self._observation()
+        if not self.observation_space.contains(observation):
+            raise ValueError("Planning scene is outside the policy observation bounds.")
+        self._previous_distance = self._distance()
+        if not self.min_target_distance <= self._previous_distance <= self.max_target_distance:
+            raise ValueError("Target distance is outside the configured reaching range.")
+        self._last_obs = observation
+        self._steps, self._done = 0, False
         if self.render_mode == "human":
             self.render()
-        return self._last_obs.copy(), self._info(False, False, False)
+        return observation.copy(), self._info(False, False, False)
+
+    def reset(self, *, seed=None, options=None):
+        self.obstacle_present = True
+        _, info = self._reset_reaching(seed=seed, options=options)
+        if self.clear_episode_prob and self.np_random.random() < self.clear_episode_prob:
+            self.obstacle_present = False
+            self._set_block([1.0, 1.0])
+            return self._finish_reset(info)
+        if self.lesson is not None:
+            # A tight target band or large start gap can make some targets
+            # incompatible with a block. Resample the target, never relax the
+            # requested clearance or silently substitute an easier episode.
+            for attempt in range(64):
+                if attempt:
+                    _, info = self._reset_reaching(options=options)
+                start = self.data.site_xpos[self.tip, :2].copy()
+                delta = self.goal[:2] - start
+                length = np.linalg.norm(delta)
+                if length < 1e-8:
+                    continue
+                normal = np.array([-delta[1], delta[0]]) / length
+                for _ in range(128):
+                    along = self.np_random.uniform(*self.lesson.along)
+                    lateral = self.np_random.uniform(*self.lesson.lateral)
+                    lateral *= self.np_random.choice((-1, 1))
+                    xy = start + along * delta + lateral * normal
+                    if not (0.16 <= xy[0] <= 0.34 and -0.20 <= xy[1] <= 0.10):
+                        continue
+                    if self._valid_layout(xy):
+                        return self._finish_reset(info)
+            raise RuntimeError(
+                f"No feasible layout for curriculum stage {self.curriculum_stage}."
+            )
+        return self._reset_baseline(info)
+
+    def _reset_baseline(self, info):
+        start_xy = self.data.site_xpos[self.tip, :2].copy()
+        segment = self.goal[:2] - start_xy
+        segment_length_sq = float(np.dot(segment, segment))
+
+        # Prefer feasible layouts closest to the direct reach.
+        best_xy = None
+        best_clearance = float("inf")
+        for _ in range(1000):
+            self.obstacle_xy = self.np_random.uniform(
+                np.array([0.16, -0.20]), np.array([0.34, 0.10])
+            )
+            along = np.clip(
+                np.dot(self.obstacle_xy - start_xy, segment) / segment_length_sq,
+                0.0, 1.0,
+            )
+            nearest = start_xy + along * segment
+            clearance = float(np.linalg.norm(self.obstacle_xy - nearest))
+            if clearance >= best_clearance:
+                continue
+            if self._valid_layout(self.obstacle_xy):
+                best_xy = self.obstacle_xy.copy()
+                best_clearance = clearance
+
+        if best_xy is None:
+            raise RuntimeError("Could not sample a collision-free obstacle layout.")
+        self._set_block(best_xy)
+        return self._finish_reset(info)
+
+
+class JawObstacleEnv(StaticObstacleEnv):
+    """Report the jaw-to-block surface vector in world coordinates (meters)."""
+
+    def __init__(self, render_mode=None, max_steps=200, **kwargs):
+        super().__init__(render_mode=render_mode, max_steps=max_steps, **kwargs)
+        jaw = self.model.body("moving_jaw_so101_v1").id
+        self.jaw_geom, = self.arm_geoms[self.model.geom_bodyid[self.arm_geoms] == jaw]
+        low = self.observation_space.low.copy()
+        high = self.observation_space.high.copy()
+        low[8:11], high[8:11] = -2.0, 2.0
+        self.observation_space = spaces.Box(low, high)
+
+    def _observation(self):
+        obs = super()._observation()
+        if not self.obstacle_present:
+            return obs
+        points = np.zeros(6)
+        gap = mujoco.mj_geomDistance(
+            self.model, self.data, self.jaw_geom, self.block_geom, 2.0, points
+        )
+        obs[8:11] = points[3:] - points[:3] if gap > 0 else 0.0
+        return obs
+
+
+TASK_ENVS = {
+    "reaching": ReachingEnv,
+    "static-obstacle": StaticObstacleEnv,
+    "jaw-obstacle": JawObstacleEnv,
+}
