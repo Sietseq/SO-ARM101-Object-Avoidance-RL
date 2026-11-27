@@ -118,15 +118,18 @@ class StaticObstacleEnv(ReachingEnv):
         self.data.mocap_pos[self.obstacle_mocap] = [*xy, self.obstacle_center_z]
         mujoco.mj_forward(self.model, self.data)
 
-    def _valid_layout(self, xy):
-        self._set_block(xy)
-        self._place(self.start_pose)
-        if self._collision() or any(
+    def _has_start_clearance(self):
+        return not self._collision() and all(
             mujoco.mj_geomDistance(
                 self.model, self.data, self.block_geom, int(geom),
                 self.min_start_clearance, None,
-            ) < self.min_start_clearance for geom in self.arm_geoms
-        ):
+            ) >= self.min_start_clearance for geom in self.arm_geoms
+        )
+
+    def _valid_layout(self, xy):
+        self._set_block(xy)
+        self._place(self.start_pose)
+        if not self._has_start_clearance():
             return False
         self._place(self._goal_pose)
         return not self._collision()
@@ -138,6 +141,53 @@ class StaticObstacleEnv(ReachingEnv):
         if self.render_mode == "human":
             self.render()
         return self._last_obs.copy(), info
+
+    def place_planning_start(self, joint_positions, obstacle_xy, home_tolerance=0.0):
+        """Verify and place the stationary measured arm and the training block."""
+        self._done = True
+        joints = np.asarray(joint_positions, dtype=np.float64)
+        xy = np.asarray(obstacle_xy, dtype=np.float64)
+        for name, value, size in (("joint_positions", joints, 6), ("obstacle_xy", xy, 2)):
+            if value.shape != (size,) or not np.isfinite(value).all():
+                raise ValueError(f"{name} must contain {size} finite values.")
+        if not np.isfinite(home_tolerance) or home_tolerance < 0:
+            raise ValueError("home_tolerance must be finite and nonnegative.")
+        if np.any(joints < self.limits[:, 0]) or np.any(joints > self.limits[:, 1]):
+            raise ValueError("Measured joints are outside the model limits.")
+
+        mujoco.mj_resetData(self.model, self.data)
+        self._place(self.start_pose)
+        if np.any(np.abs(joints - self.data.qpos[self.addresses]) > home_tolerance):
+            raise ValueError("Measured joints are outside the training home tolerance.")
+        self.data.qpos[self.addresses] = joints
+        self.data.ctrl[self.actuators] = joints
+        self.obstacle_present = True
+        self._set_block(xy)
+        if not self._has_start_clearance():
+            raise ValueError("Starting scene is in contact or lacks obstacle clearance.")
+        return self.data.site_xpos[self.tip].copy()
+
+    def reset_for_planning(self, *, joint_positions, target_position, obstacle_xy,
+                           home_tolerance=0.0):
+        """Start a rollout from measured joints (radians) to a world target (meters)."""
+        self.place_planning_start(joint_positions, obstacle_xy, home_tolerance)
+        target = np.asarray(target_position, dtype=np.float64)
+        if target.shape != (3,) or not np.isfinite(target).all():
+            raise ValueError("target_position must contain 3 finite values.")
+        self.goal = target.copy()
+        self.data.mocap_pos[self.mocap] = target
+        mujoco.mj_forward(self.model, self.data)
+        observation = self._observation()
+        if not self.observation_space.contains(observation):
+            raise ValueError("Planning scene is outside the policy observation bounds.")
+        self._previous_distance = self._distance()
+        if not self.min_target_distance <= self._previous_distance <= self.max_target_distance:
+            raise ValueError("Target distance is outside the configured reaching range.")
+        self._last_obs = observation
+        self._steps, self._done = 0, False
+        if self.render_mode == "human":
+            self.render()
+        return observation.copy(), self._info(False, False, False)
 
     def reset(self, *, seed=None, options=None):
         self.obstacle_present = True
