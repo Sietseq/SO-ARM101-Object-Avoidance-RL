@@ -1,6 +1,9 @@
 # Project guidance
 
 Read PROJECT_SPECS.md and README.md before making changes.
+For ROS 2 environment, build, run, and inspection commands, consult
+ROS2_COMMANDS.md and verify commands against the installed distribution and
+the current workspace packages before documenting them as functional.
 
 ## Hiwonder hardware and LeRobot
 
