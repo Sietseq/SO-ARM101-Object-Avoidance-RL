@@ -27,6 +27,7 @@ def evaluate(
     env = env_class(render_mode="human" if render else None, **kwargs)
     results = []
     sides = []
+    successful_boxes = []
     try:
         # Prediction needs no attached training environment; stage bounds may
         # differ while retaining the same 19 inputs and five outputs.
@@ -120,6 +121,13 @@ def evaluate(
                 truncated, total_reward, step + 1,
                 initial_distance, info["distance"], closest,
             ])
+            box_summary = ""
+            if info["is_success"] and task == "static-obstacle":
+                box_center = [*env.obstacle_xy.tolist(), env.obstacle_center_z]
+                successful_boxes.append((seed + episode, box_center))
+                box_summary = (
+                    f", box-center-m={np.round(box_center, 4).tolist()}"
+                )
             outcomes = [
                 name for name, occurred in (
                     ("success", info["is_success"]),
@@ -134,7 +142,7 @@ def evaluate(
                 f"steps={step + 1}, reward={total_reward:.2f}, "
                 f"distance={initial_distance * 100:.1f}"
                 f" -> {info['distance'] * 100:.1f} cm, "
-                f"closest={closest * 100:.1f} cm",
+                f"closest={closest * 100:.1f} cm{box_summary}",
                 flush=True,
             )
 
@@ -151,6 +159,14 @@ def evaluate(
         print(f"Mean distance: {means[6] * 100:.1f}"
               f" -> {means[7] * 100:.1f} cm")
         print(f"Mean closest distance: {means[8] * 100:.1f} cm")
+        if successful_boxes:
+            print("Successful box centers (X Y Z meters):", flush=True)
+            for successful_seed, center in successful_boxes:
+                print(
+                    f"seed={successful_seed}: "
+                    f"{' '.join(f'{value:.4f}' for value in center)}",
+                    flush=True,
+                )
         groups = []
         sides = np.asarray(sides)
         for side in ("left", "center", "right"):

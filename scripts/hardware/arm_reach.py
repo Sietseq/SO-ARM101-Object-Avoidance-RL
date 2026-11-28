@@ -19,6 +19,8 @@ from scripts.so101.calibration import connected_reader, load_calibration, load_m
 from scripts.so101.geometry import check_pose, check_segment, configure_rollout
 from scripts.so101.hiwonder_control import HiwonderArm
 
+HARDWARE_TARGET_TOLERANCE_M = 0.04
+
 
 def measured(arm, *, settle=False):
     deadline = time.monotonic() + 3.0
@@ -37,6 +39,28 @@ def send_move(arm, env, start, target, margin):
     check_pose(env, start, margin)
     check_segment(env, start, rounded, margin)
     arm.send(ticks)
+
+
+def preview_trajectory(env, points, obstacle_xy):
+    """Show the selected simulated joint path before physical replay."""
+    import mujoco
+
+    env.render_mode = 'human'
+    env._set_block(obstacle_xy)
+    env.render()
+    if env._viewer is None or not env._viewer.is_running():
+        raise RuntimeError('MuJoCo preview window could not be opened')
+    print('Inspect the simulated path in the MuJoCo window. Close it or press Enter to continue.')
+    try:
+        for point in points:
+            with env._viewer.lock():
+                env.data.qpos[env.addresses] = point['positions']
+                mujoco.mj_forward(env.model, env.data)
+                env._viewer.sync()
+            time.sleep(0.02)
+        input('Preview complete. Press Enter to return to the terminal: ')
+    finally:
+        env.close()
 
 
 def run_reach(arm, env, policy, home, tolerance, margin):
@@ -61,35 +85,53 @@ def run_reach(arm, env, policy, home, tolerance, margin):
         raise ValueError('Expected three finite coordinates')
     xy, env.obstacle_center_z = np.array(center[:2]), center[2]
     start = measured(arm, settle=True)
-    result, rejected = plan(env, policy, start, xy, margin=margin, home_tolerance=tolerance,
-                            far_only=True)
+    result, rejected = plan(env, policy, start, xy, margin=margin, home_tolerance=tolerance)
     if result is None:
-        raise RuntimeError(f'No valid far-side reach: {dict(rejected)}')
+        raise RuntimeError(f'No valid obstacle-avoiding reach: {dict(rejected)}')
 
     points = result['trajectory']
     print(f"Target {result['target'].round(3)} m, {len(points)-1} policy steps, "
           f"simulated clearance {result['min_clearance']*1000:.1f} mm")
+    preview_trajectory(env, points, xy)
     if input('Type go to replay: ').strip() != 'go':
         return
     if np.max(np.abs(measured(arm, settle=True) - start)) > tolerance:
         raise RuntimeError('Arm moved since planning')
     bounds = env.model.actuator_ctrlrange[env.actuators[:5]].T
-    for before, after in zip(points, points[1:]):
-        # PPO commands each increment from the joint measurement at the start of its step.
-        delta = after['commands'][:5] - before['positions'][:5]
-        current = measured(arm)
-        target = np.r_[np.clip(current[:5] + delta, *bounds), home[-1]]
-        send_move(arm, env, current, target, margin)
-        time.sleep(max(env.control_dt, np.max(np.abs(target - current) / speeds)))
+    previous_target = points[0]['commands'].copy()
+    for step, after in enumerate(points[1:], start=1):
+        waypoint = np.r_[np.clip(after['commands'][:5], *bounds), home[-1]]
+        segment = waypoint - previous_target
+        frames = max(1, int(np.ceil(np.max(np.abs(segment) / speeds) / env.control_dt)))
+        interval = time.monotonic() + env.control_dt
+        for frame in range(1, frames + 1):
+            target = previous_target + segment * (frame / frames)
+            current = measured(arm)
+            send_move(arm, env, current, target, margin)
+            time.sleep(max(0.0, interval - time.monotonic()))
+            interval += env.control_dt
+        actual = measured(arm)
+        fields = []
+        for name, planned, commanded, observed in zip(
+                arm.names, after['positions'], target, actual, strict=True):
+            error_deg = np.rad2deg(observed - commanded)
+            fields.append(
+                f'{name}: plan={np.rad2deg(planned):.1f}°, '
+                f'cmd={np.rad2deg(commanded):.1f}°, '
+                f'meas={np.rad2deg(observed):.1f}°, err={error_deg:+.1f}°'
+            )
+        print(f'Replay {step}/{len(points) - 1} | ' + ' | '.join(fields), flush=True)
+        previous_target = waypoint
 
     check_pose(env, measured(arm, settle=True), margin)
     tip = env.data.site_xpos[env.tip]
-    direction = xy - points[0]['tip'][:2]
-    beyond = (tip[:2] - xy) @ direction > env.obstacle_half_size[:2] @ np.abs(direction)
     error = np.linalg.norm(tip - result['target'])
-    if not beyond or error > env.tolerance:
-        raise RuntimeError(f'Reach missed: tip error {error*100:.1f} cm, beyond box: {beyond}')
-    print(f'Reached the far side. Tip error {error*100:.1f} cm.')
+    if error > HARDWARE_TARGET_TOLERANCE_M:
+        raise RuntimeError(
+            f'Reach missed: tip error {error*100:.1f} cm '
+            f'(hardware tolerance {HARDWARE_TARGET_TOLERANCE_M*100:.1f} cm)'
+        )
+    print(f'Reached the target. Tip error {error*100:.1f} cm.')
 
 
 def main():

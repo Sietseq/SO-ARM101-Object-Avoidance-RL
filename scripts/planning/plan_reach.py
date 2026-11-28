@@ -99,7 +99,6 @@ def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0
     targets = candidate_targets(env, start, obstacle, direction, margin, seed)
     if not targets:
         return None, Counter({"no reachable candidates sampled": 1})
-    far_edge = np.abs(direction) @ env.obstacle_half_size[:2]
     for prefer_far in (True, False):
         if far_only and not prefer_far:
             break
@@ -129,10 +128,7 @@ def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0
                 elif timeout:
                     rejected["timeout"] += 1
                 elif done:
-                    end_offset = env.data.site_xpos[env.tip, :2] - obstacle
-                    if far and end_offset @ direction <= far_edge:
-                        rejected["gripper stopped short of far side"] += 1
-                    elif info["is_success"]:
+                    if info["is_success"]:
                         rank = (env.min_gap, -env.data.time)
                         if best is None or rank > best["rank"]:
                             candidate = dict(rank=rank, target=target.copy(), far_side=far,

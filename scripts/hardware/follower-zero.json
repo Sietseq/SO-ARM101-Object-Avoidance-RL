@@ -1,0 +1,12 @@
+{
+  "reference_pose": "model_zero",
+  "calibration_sha256": "8662912bd5f49389cd63aaa9b010eede1ea5d1d3106f170cc4960679d89066cb",
+  "joints": {
+    "shoulder_pan": {"zero_tick": 2029, "sign": 1},
+    "shoulder_lift": {"zero_tick": 2051, "sign": 1},
+    "elbow_flex": {"zero_tick": 2115, "sign": 1},
+    "wrist_flex": {"zero_tick": 1946, "sign": 1},
+    "wrist_roll": {"zero_tick": 2065, "sign": 1},
+    "gripper": {"zero_tick": 2011, "sign": 1}
+  }
+}
