@@ -81,6 +81,18 @@ To continue training a reaching checkpoint:
 python -m scripts.policy.train_ppo --resume outputs/ppo-reaching-seed0/best/best_model.zip --device cpu --learning-rate 0.00003 --timesteps 50000 --eval-freq 5000 --output outputs/ppo-reaching-continued
 ```
 
+### Hardware reach status
+
+The physical reach demo previews the planned joint path in MuJoCo before
+replay. Its hardware target tolerance is 4 cm to account for the arm's limited
+repeatability; this is looser than the simulator's 2 cm success tolerance.
+The follower home configuration uses a maximum speed of 0.50 rad/s. Treat
+these settings as experimental: homing and replay have not been validated
+across repeated runs, and hardware joint commands can diverge from the
+simulated policy trajectory. Inspect the preview, keep the workspace clear,
+and supervise the arm during every replay. See
+[EXPERIMENTS.md](EXPERIMENTS.md#hardware-reach-demo) for observed issues.
+
 ## Static obstacle avoidance
 
 Train the static-block task with curriculum stage 1, or use

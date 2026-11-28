@@ -65,3 +65,32 @@ These matched results describe the earlier checkpoints and should not be
 read as results for `static-curriculum-stage1-continued`. The latest run's
 saved progress records its curriculum evaluation; a separate held-out
 evaluation is not recorded here.
+
+## Hardware reach demo
+
+The first physical demo completed, but hardware replay remains experimental.
+The script previews the simulated trajectory in MuJoCo before asking the
+operator to type `go`, streams interpolated joint commands, and reports
+planned, commanded, and measured joint angles. The planner tries far-side
+candidates first and can fall back to a valid near-side reach. It no longer
+rejects a trajectory solely because the tip did not pass the box's far edge.
+The hardware endpoint tolerance is 4 cm; the simulator's task success
+tolerance remains 2 cm.
+
+Observed limitations:
+
+- Homing is not yet repeatable enough to assume the same starting pose on
+  every run. Replanning from a pose that is already reaching has sometimes
+  failed the starting-clearance check.
+- During a 115-waypoint replay, measured joint angles stayed close to the
+  commanded angles in the printed samples, but commanded angles diverged
+  substantially from the simulated plan on several joints. Shoulder lift,
+  wrist flex, and wrist roll were especially far from their planned values
+  through much of the replay. A simulated path reaching its target therefore
+  does not guarantee the physical replay will do so.
+- Maximum follower speed was raised to 0.50 rad/s to reduce execution time.
+  This setting and interpolated streaming have not been validated over
+  repeated hardware runs.
+
+Use the preview and supervise every physical replay. Treat the 4 cm endpoint
+tolerance as an experimental acceptance threshold, not a precision claim.
