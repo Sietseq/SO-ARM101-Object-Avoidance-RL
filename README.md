@@ -2,6 +2,8 @@
 
 This project trains a simulated robot arm to reach a target beside an upright box, then uses the learned policy to plan a reach for a physical Hiwonder SO-ARM101. An operator measures the box center. Starting from the arm's encoder readings, the planner tries several targets in MuJoCo and previews the selected motion before the operator starts replay.
 
+https://github.com/user-attachments/assets/c82a5a10-724d-4ec5-94ad-52fc09d32077
+
 ## Results
 
 | Task | Recorded outcome |
