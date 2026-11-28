@@ -14,7 +14,7 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 
-from static_obstacle_env import CURRICULUM, TASK_ENVS
+from scripts.simulation.static_obstacle_env import CURRICULUM, TASK_ENVS
 
 
 class SuccessEvalCallback(EvalCallback):

@@ -19,12 +19,11 @@ standalone evaluations.
 
 ## Repository layout
 
-- `scripts/reaching_env.py`: MuJoCo reaching environment.
-- `scripts/static_obstacle_env.py`: static-block and jaw-observation task
-  environments.
-- `scripts/train_ppo.py`: PPO training entry point.
-- `scripts/test_policy.py`: saved-policy evaluation and optional trace export.
-- `scripts/check_simulation.py`: simulation check.
+- `scripts/hardware/` runs the physical reach demo and checks follower motion.
+- `scripts/simulation/` contains the MuJoCo environments and model check.
+- `scripts/planning/` finds obstacle-avoiding reaches and validates return paths.
+- `scripts/policy/` trains PPO policies and evaluates saved checkpoints.
+- `scripts/so101/` contains the shared Hiwonder helpers, collision checks, and training home pose.
 - `models/SO101/`: SO-ARM101 model files and assets.
 - `PROJECT_SPECS.md`: project specification.
 - `EXPERIMENTS.md`: results and experiment decisions.
@@ -57,19 +56,29 @@ uses the simulator; it does not require connecting to the physical arm.
 
 ## Reaching
 
+For a physical reach, set `FOLLOWER_CALIBRATION` to the follower's calibration
+JSON and run `python -m scripts.hardware.arm_reach` from the repository root in the project environment.
+It uses the local joint mapping and motion limits in `outputs/` (see
+`--help` for overrides). Clear the workspace and type `home`. After homing,
+place the upright 36 × 36 × 240 mm box and enter its measured center as three
+space-separated world coordinates in meters. The script plans from encoder
+feedback and asks for `go` when it finds a reach beyond the box. Keep the
+box fixed during replay. Ctrl+C ends the demo and requests a measured hold.
+The home tolerance defaults to 3° (`--home-tolerance-deg`).
+
 The default task is reaching without obstacles. Training and evaluation
 sample targets 4–14 cm from the initial end-effector position. Reachability
 and joint-limit checks still apply; the success tolerance is 2 cm.
 
 ```powershell
-python scripts/train_ppo.py --task reaching --device cpu --timesteps 300000 --output outputs/ppo-reaching-seed0
-python scripts/test_policy.py outputs/ppo-reaching-seed0/best/best_model.zip --task reaching --episodes 100 --seed 1000
+python -m scripts.policy.train_ppo --task reaching --device cpu --timesteps 300000 --output outputs/ppo-reaching-seed0
+python -m scripts.policy.test_policy outputs/ppo-reaching-seed0/best/best_model.zip --task reaching --episodes 100 --seed 1000
 ```
 
 To continue training a reaching checkpoint:
 
 ```powershell
-python scripts/train_ppo.py --resume outputs/ppo-reaching-seed0/best/best_model.zip --device cpu --learning-rate 0.00003 --timesteps 50000 --eval-freq 5000 --output outputs/ppo-reaching-continued
+python -m scripts.policy.train_ppo --resume outputs/ppo-reaching-seed0/best/best_model.zip --device cpu --learning-rate 0.00003 --timesteps 50000 --eval-freq 5000 --output outputs/ppo-reaching-continued
 ```
 
 ## Static obstacle avoidance
@@ -82,8 +91,8 @@ slots. At contact or overlap it is zero. Stage `1` is the curriculum used so
 far; stage `0` retains the original sampler for comparison.
 
 ```powershell
-python scripts/train_ppo.py --task static-obstacle --curriculum-stage 1 --device cpu --timesteps 200000 --output outputs/static-curriculum-stage1
-python scripts/test_policy.py outputs/static-curriculum-stage1/best/best_model.zip --task static-obstacle --curriculum-stage 1 --episodes 50 --seed 3000
+python -m scripts.policy.train_ppo --task static-obstacle --curriculum-stage 1 --device cpu --timesteps 200000 --output outputs/static-curriculum-stage1
+python -m scripts.policy.test_policy outputs/static-curriculum-stage1/best/best_model.zip --task static-obstacle --curriculum-stage 1 --episodes 50 --seed 3000
 ```
 
 To continue a static-obstacle policy, add `--resume` with its checkpoint

@@ -7,7 +7,7 @@ from gymnasium import spaces
 import mujoco
 import numpy as np
 
-from reaching_env import ReachingEnv
+from scripts.simulation.reaching_env import ReachingEnv
 
 
 @dataclass(frozen=True)

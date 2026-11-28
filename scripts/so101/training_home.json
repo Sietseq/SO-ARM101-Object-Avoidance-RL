@@ -1,0 +1,4 @@
+{
+  "joint_names": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+  "positions_rad": [0.0, -0.13, 0.025, 0.93, 0.0, 0.0]
+}

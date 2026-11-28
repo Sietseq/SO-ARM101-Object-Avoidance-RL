@@ -8,7 +8,11 @@ import mujoco
 import numpy as np
 from stable_baselines3 import PPO
 
-from static_obstacle_env import StaticObstacleEnv
+from scripts import PROJECT_ROOT
+from scripts.simulation.static_obstacle_env import StaticObstacleEnv
+
+DEFAULT_CHECKPOINT = (PROJECT_ROOT /
+                      "outputs/static-curriculum-stage1-continued/best/best_model.zip")
 
 
 class PlanningEnv(StaticObstacleEnv):
@@ -26,6 +30,17 @@ class PlanningEnv(StaticObstacleEnv):
                 if self.min_gap <= 0:
                     return True, unsafe
         return collision, unsafe
+
+
+class RelativePlanningEnv(PlanningEnv):
+    """Test the follower's relative moves against the MuJoCo collision geometry."""
+
+    def _advance_physics(self):
+        target = np.clip(self.data.ctrl[self.actuators],
+                         *self.model.actuator_ctrlrange[self.actuators].T)
+        self.data.ctrl[self.actuators] = target
+        self.data.qpos[self.addresses] = target
+        self.data.time += self.model.opt.timestep
 
 
 def candidate_targets(env, start, obstacle, direction, margin, seed):
@@ -65,7 +80,8 @@ def candidate_targets(env, start, obstacle, direction, margin, seed):
     return [(far, target) for (far, _), target in buckets.items()]
 
 
-def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0):
+def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0,
+         prepare_candidate=None, far_only=False):
     """Return a simulated trajectory and rejection counts. A failed plan returns None."""
     if not np.isfinite(margin) or margin < 0:
         raise ValueError("Clearance margin must be finite and nonnegative.")
@@ -85,6 +101,8 @@ def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0
         return None, Counter({"no reachable candidates sampled": 1})
     far_edge = np.abs(direction) @ env.obstacle_half_size[:2]
     for prefer_far in (True, False):
+        if far_only and not prefer_far:
+            break
         best = None
         for far, target in targets:
             if far != prefer_far:
@@ -117,10 +135,17 @@ def plan(env, policy, joints, obstacle_xy, *, margin, home_tolerance=0.0, seed=0
                     elif info["is_success"]:
                         rank = (env.min_gap, -env.data.time)
                         if best is None or rank > best["rank"]:
-                            best = dict(rank=rank, target=target.copy(), far_side=far,
+                            candidate = dict(rank=rank, target=target.copy(), far_side=far,
                                         obstacle_xy=obstacle.copy(), margin=margin,
                                         end_velocity=env.data.qvel.copy(),
                                         min_clearance=env.min_gap, trajectory=points)
+                            if prepare_candidate is not None:
+                                try:
+                                    candidate['trajectory'] = prepare_candidate(env, candidate)
+                                except ValueError as exc:
+                                    rejected[str(exc)] += 1
+                                    break
+                            best = candidate
                 else:
                     continue
                 break
@@ -234,9 +259,7 @@ def main():
     parser.add_argument("--min-clearance", type=float, required=True, help="Simulation margin in meters")
     parser.add_argument("--validate-return", action="store_true",
                         help="Independently simulate the return after an accepted reach")
-    parser.add_argument("--checkpoint", type=Path,
-                        default=Path(__file__).resolve().parents[1] /
-                        "outputs/static-curriculum-stage1-continued/best/best_model.zip")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     args = parser.parse_args()
     env = PlanningEnv(curriculum_stage=1)
     try:

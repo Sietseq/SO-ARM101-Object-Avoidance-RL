@@ -2,7 +2,8 @@
 
 import argparse
 from contextlib import nullcontext
-from pathlib import Path
+import json
+from importlib.resources import files
 import time
 import xml.etree.ElementTree as ET
 
@@ -11,7 +12,12 @@ from gymnasium import spaces
 import mujoco
 import numpy as np
 
-ARM = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
+from scripts import PROJECT_ROOT
+
+_HOME_FILE = files("scripts.so101").joinpath("training_home.json")
+_HOME = json.loads(_HOME_FILE.read_text(encoding="utf-8"))
+JOINT_NAMES = tuple(_HOME["joint_names"])
+ARM = JOINT_NAMES[:-1]
 
 
 class ReachingEnv(gym.Env):
@@ -19,7 +25,7 @@ class ReachingEnv(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 20}
     success_bonus = 10.0
-    start_pose = np.array([0.0, -0.13, 0.025, 0.93, 0.0])
+    start_pose = np.array(_HOME["positions_rad"][:-1])
 
     def __init__(self, render_mode=None, max_steps=200, *,
                  min_target_distance=0.04, max_target_distance=0.14):
@@ -33,7 +39,7 @@ class ReachingEnv(gym.Env):
         self.max_target_distance = max_target_distance
 
         # Load the robot scene before adding the target marker.
-        root = Path(__file__).resolve().parents[1] / "models/SO101"
+        root = PROJECT_ROOT / "models/SO101"
         xml = ET.fromstring((root / "scene.xml").read_text())
         
         # The target is a visual marker, so reaching it never causes a collision.
@@ -55,7 +61,7 @@ class ReachingEnv(gym.Env):
         self.data = mujoco.MjData(self.model)
         
         # Look up joint positions and their matching actuators.
-        names = (*ARM, "gripper")
+        names = JOINT_NAMES
         joints = [self.model.joint(n).id for n in names]
         self.addresses = self.model.jnt_qposadr[joints]
         self.actuators = [self.model.actuator(n).id for n in names]
@@ -99,7 +105,7 @@ class ReachingEnv(gym.Env):
     def _place(self, angles):
         # Set the arm pose, hold the gripper closed, and clear motion.
         self.data.qpos[self.addresses[:5]] = angles
-        self.data.qpos[self.addresses[5]] = 0
+        self.data.qpos[self.addresses[5]] = _HOME["positions_rad"][-1]
         self.data.qvel[:] = 0
         self.data.ctrl[self.actuators] = self.data.qpos[self.addresses]
         mujoco.mj_forward(self.model, self.data)
@@ -184,8 +190,10 @@ class ReachingEnv(gym.Env):
         return {"is_success": bool(success), "collision": bool(collision),
                 "unsafe": bool(unsafe), "distance": float(self._previous_distance)}
 
+    def _advance_physics(self):
+        mujoco.mj_step(self.model, self.data)
+
     def step(self, action):
-        # Require an active episode and five finite action values.
         if self._done:
             raise gym.error.ResetNeeded("Call reset() before the next step.")
         action = np.asarray(action, dtype=np.float64)
@@ -198,7 +206,7 @@ class ReachingEnv(gym.Env):
             target = np.clip(
                 q + increment * np.clip(action, -1, 1), *self.limits[:5].T
             )
-            self.data.ctrl[self.actuators[5]] = 0
+            self.data.ctrl[self.actuators[5]] = _HOME["positions_rad"][-1]
             collision, unsafe = self._status()
             for substep in range(self.substeps):
                 if collision or unsafe:
@@ -208,7 +216,7 @@ class ReachingEnv(gym.Env):
                 fraction = (substep + 1) / self.substeps
                 self.data.ctrl[self.actuators[:5]] = q + fraction * (target - q)
                 before = self.data.time
-                mujoco.mj_step(self.model, self.data)
+                self._advance_physics()
                 # Refresh contact geometry after integration, checking every
                 # physics step so a brief contact is not missed between actions.
                 mujoco.mj_forward(self.model, self.data)

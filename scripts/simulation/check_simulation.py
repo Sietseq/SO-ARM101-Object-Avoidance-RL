@@ -3,11 +3,12 @@
 import argparse
 from contextlib import nullcontext
 import math
-from pathlib import Path
 import time
 
 import mujoco
 import numpy as np
+
+from scripts import PROJECT_ROOT
 
 ARM_JOINTS = (
     "shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll",
@@ -19,7 +20,7 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--free-camera", action="store_true")
     args = parser.parse_args()
-    scene = Path(__file__).resolve().parents[1] / "models/SO101/scene.xml"
+    scene = PROJECT_ROOT / "models/SO101/scene.xml"
     model = mujoco.MjModel.from_xml_path(str(scene))
     data = mujoco.MjData(model)
     names = (*ARM_JOINTS, "gripper")

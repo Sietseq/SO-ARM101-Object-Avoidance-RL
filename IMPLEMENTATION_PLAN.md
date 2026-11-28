@@ -65,7 +65,7 @@ Supply the block center in world XY and the required simulation clearance in
 meters. For example, this scene uses a 2 mm demonstration margin.
 
 ```powershell
-python scripts/plan_reach.py --obstacle-xy 0.29336519 -0.09268185 --min-clearance 0.002
+python -m scripts.planning.plan_reach --obstacle-xy 0.29336519 -0.09268185 --min-clearance 0.002
 ```
 
 With the 635k checkpoint this selected a far-side target at approximately
@@ -77,7 +77,7 @@ returned an empty plan. Physical clearance requirements still need measurement.
 ### Validating the return
 
 ```powershell
-python scripts/plan_reach.py --obstacle-xy 0.29336519 -0.09268185 --min-clearance 0.002 --validate-return
+python -m scripts.planning.plan_reach --obstacle-xy 0.29336519 -0.09268185 --min-clearance 0.002 --validate-return
 ```
 
 The command uses the selected reach's simulated endpoint feedback and assumes
@@ -101,8 +101,38 @@ measurement, and reached settled home with increasing trajectory timestamps.
 
 ## ROS 2 and hardware milestones
 
-- [ ] Choose and verify the ROS 2 and Python environment. Expose the training
-  home definition to both planner and mock robot through a shared module.
+- [x] Verify ROS 2 Jazzy and Python 3.12 together. With the Jazzy underlay
+  sourced, the project environment imported rclpy, MuJoCo, Gymnasium and
+  Stable-Baselines3. The simulator and mock robot both read the six ordered
+  joint names and positions from `scripts/so101/training_home.json`. The
+  standalone planner uses the same definition through its environment.
+- [x] Implement mock joint feedback, robot state and a cancellable homing
+  action. In the clear mock workspace the arm starts with shoulder pan 0.1 rad
+  above home. The action requires clear-workspace confirmation for motion
+  and traverses that single joint segment at up to 0.05 rad/s. READY requires
+  all six joints within tolerance and stationary for 0.1 s.
+- [x] Build the generated ROS interfaces and run `test_mock_homing.py`
+  against the mock action server. The operator confirmed the workspace build
+  and homing test passed.
+- [x] Add the planner's `/planner/check_start` service. It checks the age
+  of both feedback topics, READY and fault status, and the position and
+  velocity of all six named joints. The verifier supplies measured joints in
+  training order. The ROS integration test rejected the start before homing,
+  accepted it after settling, and rejected it again after feedback stopped.
+- [x] Connect the stamped mock block center and the standalone PPO planner
+  to `/start_demo`. Snapshot measured home and obstacle coordinates, run the
+  Stage 1 candidate search in a background worker, then publish the selected
+  timed actuator targets on `/planned_trajectory` for inspection.
+- [x] Add separately authorized mock trajectory execution. The planner
+  rechecks robot and obstacle feedback, consumes one selected plan per
+  authorization and sends a cancellable `FollowJointTrajectory` goal to the
+  mock robot. The robot publishes timed joint feedback and finishes in
+  `AT_TARGET`. The single-terminal integration test checks the final six
+  positions, rejection after an obstacle change, and cancellation during motion.
+- [x] Connect `/return_home` to independent MuJoCo validation. The request
+  uses the executed outbound rollout, the current measured joint positions
+  and velocities, and the unchanged block. Only a validated trajectory goes
+  to the mock return action. Home completion requires all six joints to settle.
 - [ ] Implement camera, planner, and robot nodes with mock obstacle input,
   measured mock joint feedback, cancellable homing and trajectory actions,
   and explicit operator authorization for execution.
@@ -113,3 +143,54 @@ measurement, and reached settled home with increasing trajectory timestamps.
   performance. Measure camera intrinsics, camera-to-mount transform, table
   plane, and stick geometry for mapping into the robot base frame. Hardware
   calibration and physical execution are pending.
+
+### Physical follower feedback
+
+- [x] Add an opt-in encoder reader to `robot_node`. Raw mode reads and checks
+  the follower calibration registers at all six IDs. Mapped mode uses two
+  measured joint references per axis and publishes positions in radians.
+  Register reads and torque-preserving disconnect were exercised with the
+  Hiwonder fork and simulated serial replies.
+- [x] Read all six follower IDs and compare the programmed registers with the
+  follower calibration. Jog the physical wrist and verify measured displacement
+  and torque release.
+- [x] Implement opt-in six-axis ROS control and exercise homing, outbound
+  motion, return, cancellation, operator stop and fault handling on simulated
+  HX-30HM servos using the Hiwonder SDK.
+- [ ] Verify directions and home references for all six physical joints,
+  measure working limits and validate the clear-workspace home approach.
+  Measure multi-joint tracking and stopping on the actual follower.
+
+### Shared home and mock robot verification
+
+The Stage 1 seed-3000 reset produced byte-identical observations, positions,
+velocities and commands before and after extracting the shared pose. The
+635k checkpoint reproduced the 5.50 s outbound and 5.67 s return examples.
+In the obstacle-free reaching scene, all 1,001 evenly spaced poses on the
+predefined mock homing segment passed MuJoCo contact and joint-limit checks.
+This check covers the ideal mock path only.
+
+Jazzy parsed both custom interface definitions. The Python package passed
+the ROS flake8 and pep257 checks. An in-process check with ROS transport
+doubles exercised feedback, clear-workspace rejection, concurrent goal
+rejection, cancellation, retry, settling and the already-home case.
+
+### Mock outbound reach verification
+
+The ROS service and topic integration test uses the local 635k checkpoint.
+It published a trajectory from shuffled joint feedback with a 0.001 rad
+wrist-roll offset and preserved that measurement in the first trajectory
+point. Timestamps increased from zero. The blocked layout at
+`[0.29, 0.02]` m produced a planning failure. A stale feedback stream
+prevented admission, and moving the obstacle during a later search
+invalidated that result. Only the successful request published a trajectory.
+The test exercises the ROS interfaces in one process with mock measurements.
+
+### Mock return verification
+
+The one-terminal `round_trip` case homes, plans, executes the reach and
+explicitly requests a return. A 0.003 rad shoulder-pan offset in the live
+endpoint feedback appears in the first return command. The mock reaches all
+six training-home positions, reports zero velocity and transitions to READY.
+In the `moved_at_target` case, moving the observed block by 1 cm and then
+restoring it rejects the return and leaves the arm stationary at the endpoint.

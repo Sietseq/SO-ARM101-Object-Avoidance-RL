@@ -9,8 +9,8 @@ import numpy as np
 from stable_baselines3 import PPO
 import torch
 
-from reaching_env import ARM
-from static_obstacle_env import CURRICULUM, TASK_ENVS
+from scripts.simulation.reaching_env import ARM
+from scripts.simulation.static_obstacle_env import CURRICULUM, TASK_ENVS
 
 
 def evaluate(
